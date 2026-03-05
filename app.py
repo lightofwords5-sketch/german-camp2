@@ -5,21 +5,27 @@
 
 import streamlit as st
 import pandas as pd
-import gspread
-import bcrypt
 import json
 import random
 import datetime
 import time
 import re
-from google.oauth2.service_account import Credentials
+import gspread
+import bcrypt
+from groq import Groq
 
-# ── optional AI ─────────────────────────────────────────────────────
-try:
-    import anthropic
-    AI_AVAILABLE = True
-except ImportError:
-    AI_AVAILABLE = False
+# module imports after refactor
+from auth import hash_pw, check_pw, get_user, register_user, login_user, update_user_xp
+from data_manager import load_sheet, write_row, update_cell_by_key, get_gsheet_client
+from ai_engine import ai_chat as engine_chat, ai_grammar_fixer
+from ui_components import *
+from dictionary import *
+from config import tr
+
+# initialize AI client (Groq)
+client = Groq(api_key=st.secrets.get('GROQ_API_KEY',''))
+
+AI_AVAILABLE = True  # set to True if GROQ key exists
 
 # ────────────────────────────────────────────────────────────────────
 #  PAGE CONFIG
@@ -120,126 +126,6 @@ div[data-testid="column"]{padding:6px!important;}
 </style>
 """, unsafe_allow_html=True)
 
-# ════════════════════════════════════════════════════════════════════
-#  GOOGLE SHEETS  —  lazy singleton connection
-# ════════════════════════════════════════════════════════════════════
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
-@st.cache_resource(ttl=60)
-def get_gsheet_client():
-    """Returns authenticated gspread client using service account from secrets."""
-    try:
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-        return gspread.authorize(creds)
-    except Exception:
-        return None
-
-@st.cache_data(ttl=30)
-def load_sheet(sheet_name: str) -> pd.DataFrame:
-    """Load a worksheet tab as a DataFrame (cached 30 s)."""
-    client = get_gsheet_client()
-    if client is None:
-        return pd.DataFrame()
-    try:
-        sheet_id = st.secrets["sheet_id"]
-        wk = client.open_by_key(sheet_id).worksheet(sheet_name)
-        return pd.DataFrame(wk.get_all_records())
-    except Exception:
-        return pd.DataFrame()
-
-def write_row(sheet_name: str, row: list):
-    """Append a row to a worksheet."""
-    client = get_gsheet_client()
-    if client is None:
-        return False
-    try:
-        sheet_id = st.secrets["sheet_id"]
-        wk = client.open_by_key(sheet_id).worksheet(sheet_name)
-        wk.append_row(row, value_input_option="USER_ENTERED")
-        load_sheet.clear()
-        return True
-    except Exception as e:
-        st.error(f"Sheet write error: {e}")
-        return False
-
-def update_cell_by_key(sheet_name: str, key_col: str, key_val, target_col: str, new_val):
-    """Update a single cell identified by key column."""
-    client = get_gsheet_client()
-    if client is None:
-        return
-    try:
-        sheet_id = st.secrets["sheet_id"]
-        wk = client.open_by_key(sheet_id).worksheet(sheet_name)
-        records = wk.get_all_records()
-        headers = wk.row_values(1)
-        key_idx = headers.index(key_col) + 1
-        tgt_idx = headers.index(target_col) + 1
-        for i, row in enumerate(records, start=2):
-            if str(row.get(key_col)) == str(key_val):
-                wk.update_cell(i, tgt_idx, new_val)
-                break
-        load_sheet.clear()
-    except Exception as e:
-        st.error(f"Update error: {e}")
-
-# ════════════════════════════════════════════════════════════════════
-#  AUTH HELPERS
-# ════════════════════════════════════════════════════════════════════
-def hash_pw(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-
-def check_pw(password: str, hashed: str) -> bool:
-    try:
-        return bcrypt.checkpw(password.encode(), hashed.encode())
-    except Exception:
-        return False
-
-def get_user(email: str) -> dict | None:
-    df = load_sheet("Users")
-    if df.empty or "Email" not in df.columns:
-        return None
-    row = df[df["Email"].str.lower() == email.lower()]
-    return row.iloc[0].to_dict() if not row.empty else None
-
-def register_user(name: str, email: str, password: str) -> bool:
-    if get_user(email):
-        return False
-    hashed = hash_pw(password)
-    now = datetime.datetime.now().isoformat()
-    return write_row("Users", [name, email, hashed, 0, 0, 1, 0, now, ""])
-
-def login_user(email: str, password: str):
-    user = get_user(email)
-    if user and check_pw(password, str(user.get("Password", ""))):
-        return user
-    return None
-
-def update_user_xp(email: str, new_xp: int, new_streak: int, completed_days_json: str):
-    """Bulk update XP, streak, and completed days for a user."""
-    client = get_gsheet_client()
-    if not client:
-        return
-    try:
-        sheet_id = st.secrets["sheet_id"]
-        wk = client.open_by_key(sheet_id).worksheet("Users")
-        records = wk.get_all_records()
-        headers = wk.row_values(1)
-        for i, row in enumerate(records, start=2):
-            if str(row.get("Email", "")).lower() == email.lower():
-                xp_col = headers.index("XP") + 1
-                streak_col = headers.index("Streak") + 1
-                days_col = headers.index("CompletedDays") + 1
-                wk.update_cell(i, xp_col, new_xp)
-                wk.update_cell(i, streak_col, new_streak)
-                wk.update_cell(i, days_col, completed_days_json)
-                break
-        load_sheet.clear()
-    except Exception as e:
-        st.error(f"XP update error: {e}")
 
 # ════════════════════════════════════════════════════════════════════
 #  SESSION STATE INIT
@@ -371,54 +257,20 @@ def is_admin() -> bool:
     return st.session_state.is_admin
 
 # ════════════════════════════════════════════════════════════════════
-#  AI COPILOT
+#  AI COPILOT (wrapped via ai_engine)
 # ════════════════════════════════════════════════════════════════════
+# We now delegate all AI logic to ai_engine (Groq) imported above.  
+# The functions below simply call those helpers, ensuring the rest of
+# the codebase can continue using the same names.
+
 def ai_correct_german(text: str) -> str:
-    """Call Anthropic API to correct German text."""
-    try:
-        api_key = st.secrets.get("anthropic_api_key", "")
-        if not api_key:
-            return "⚠️ AI API key not configured. Add `anthropic_api_key` to your secrets.toml."
-        client = anthropic.Anthropic(api_key=api_key)
-        msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=800,
-            system=(
-                "You are an expert German language tutor. "
-                "The student writes German text and you must:\n"
-                "1. Provide the corrected version in bold.\n"
-                "2. List each error with a clear explanation in English.\n"
-                "3. End with one encouraging sentence in German.\n"
-                "Keep responses concise and educational."
-            ),
-            messages=[{"role":"user","content":f"Please correct my German:\n\n{text}"}],
-        )
-        return msg.content[0].text
-    except Exception as e:
-        return f"AI error: {e}"
+    """Wrapper around ai_grammar_fixer from ai_engine."""
+    return ai_grammar_fixer(text)
+
 
 def ai_chat(messages: list, user_msg: str) -> str:
-    """Streaming-style chat with Anthropic."""
-    try:
-        api_key = st.secrets.get("anthropic_api_key", "")
-        if not api_key:
-            return "⚠️ API key not configured."
-        client = anthropic.Anthropic(api_key=api_key)
-        history = [{"role": m["role"], "content": m["content"]} for m in messages[-10:]]
-        history.append({"role":"user","content":user_msg})
-        resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=600,
-            system=(
-                "You are Klaus, a friendly German language tutor AI. "
-                "You help students learning German with grammar, vocabulary, culture, and pronunciation. "
-                "Keep answers concise. When giving German examples, always include the English translation."
-            ),
-            messages=history,
-        )
-        return resp.content[0].text
-    except Exception as e:
-        return f"AI error: {e}"
+    """Wrapper around engine_chat imported from ai_engine."""
+    return engine_chat(messages, user_msg)
 
 # ════════════════════════════════════════════════════════════════════
 #  UI COMPONENTS
@@ -444,23 +296,23 @@ def page_auth():
         st.markdown("""
         <div class='auth-logo'>🇩🇪</div>
         <div class='auth-title'>German Mastery Camp</div>
-        <div class='auth-sub'>Your 90-day journey to German fluency starts here.</div>
-        """, unsafe_allow_html=True)
+        <div class='auth-sub'>{subtitle}</div>
+        """.format(subtitle=tr("home_subtitle")), unsafe_allow_html=True)
 
-        tab_login, tab_register = st.tabs(["🔑 Sign In", "🆕 Create Account"])
+        tab_login, tab_register = st.tabs(["🔑 " + tr("sign_in"), "🆕 " + tr("create_account")])
 
         with tab_login:
-            email = st.text_input("Email", key="li_email", placeholder="your@email.com")
-            pw    = st.text_input("Password", type="password", key="li_pw", placeholder="••••••••")
+            email = st.text_input(tr("email"), key="li_email", placeholder="you@example.com")
+            pw    = st.text_input(tr("password"), type="password", key="li_pw")
             col_a, col_b = st.columns(2)
             with col_a:
-                if st.button("Sign In →", key="btn_login", use_container_width=True):
+                if st.button(tr("sign_in") + " →", key="btn_login", use_container_width=True):
                     if not email or not pw:
-                        st.error("Please fill all fields.")
+                        st.error(tr("please_fill"))
                     else:
-                        # Demo mode: allow any login if sheets not configured
                         gc = get_gsheet_client()
                         if gc is None:
+                            # demo mode
                             st.session_state.logged_in = True
                             st.session_state.user = {"Name": email.split("@")[0].title(), "Email": email, "XP": 0, "Streak": 0, "CompletedDays": ""}
                             st.rerun()
@@ -472,47 +324,43 @@ def page_auth():
                                 sync_progress_from_db()
                                 st.rerun()
                             else:
-                                st.error("Invalid credentials.")
+                                st.error(tr("invalid_credentials"))
             with col_b:
-                admin_pw_try = st.text_input("Admin password", type="password", key="admin_pw_inp", placeholder="Admin only")
-                if st.button("Admin Login", key="btn_admin"):
-                    try:
-                        correct = st.secrets.get("admin_password", "admin1234")
-                    except Exception:
-                        correct = "admin1234"
+                admin_pw_try = st.text_input(tr("admin_login"), type="password", key="admin_pw_inp")
+                if st.button(tr("admin_login"), key="btn_admin"):
+                    correct = st.secrets.get("admin_password", "admin1234")
                     if admin_pw_try == correct:
                         st.session_state.logged_in = True
                         st.session_state.is_admin  = True
                         st.session_state.user = {"Name":"Admin","Email":"admin@camp.de","XP":9999,"Streak":90,"CompletedDays":""}
                         st.rerun()
                     else:
-                        st.error("Wrong admin password.")
+                        st.error(tr("wrong_password"))
 
         with tab_register:
-            name  = st.text_input("Full Name", key="reg_name", placeholder="Ahmed Mohamed")
-            email2 = st.text_input("Email", key="reg_email", placeholder="your@email.com")
-            pw2   = st.text_input("Password (min 6 chars)", type="password", key="reg_pw")
-            pw2c  = st.text_input("Confirm Password", type="password", key="reg_pw2")
-            if st.button("Create Account →", key="btn_reg", use_container_width=True):
+            name  = st.text_input(tr("full_name"), key="reg_name")
+            email2 = st.text_input(tr("email"), key="reg_email")
+            pw2   = st.text_input(tr("password"), type="password", key="reg_pw")
+            pw2c  = st.text_input(tr("password_confirm"), type="password", key="reg_pw2")
+            if st.button(tr("create_account") + " →", key="btn_reg", use_container_width=True):
                 if not all([name, email2, pw2, pw2c]):
-                    st.error("Please fill all fields.")
+                    st.error(tr("please_fill"))
                 elif pw2 != pw2c:
-                    st.error("Passwords don't match.")
+                    st.error(tr("password_mismatch"))
                 elif len(pw2) < 6:
-                    st.error("Password must be at least 6 characters.")
+                    st.error(tr("password_length"))
                 else:
                     gc = get_gsheet_client()
                     if gc is None:
-                        # Demo mode
                         st.session_state.logged_in = True
                         st.session_state.user = {"Name":name,"Email":email2,"XP":0,"Streak":0,"CompletedDays":""}
-                        st.success("Welcome! (Demo mode — progress won't be saved)")
+                        st.success(tr("welcome_demo"))
                         time.sleep(1); st.rerun()
                     else:
                         if register_user(name, email2, pw2):
-                            st.success("Account created! Sign in now.")
+                            st.success(tr("account_created"))
                         else:
-                            st.error("Email already registered.")
+                            st.error(tr("email_exists"))
 
         st.markdown("""
         <div style='text-align:center; margin-top:20px; color:#555; font-size:.82rem;'>

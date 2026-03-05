@@ -411,3 +411,44 @@ def get_exercise_set(topic: str, count: int = 3) -> list:
     """Return a random set of exercises for a given grammar topic."""
     exercises = GRAMMAR_EXERCISES.get(topic, [])
     return random.sample(exercises, min(count, len(exercises))) if exercises else []
+
+
+# ────────────────────────────────────────────────────────────
+#  AI GRAMMAR FIXER (via Groq)
+# ────────────────────────────────────────────────────────────
+import requests
+from config import GROQ_API_KEY
+
+
+def ai_grammar_fixer(text: str) -> str:
+    """Use Groq's Llama3-8b-8192 to correct German text."
+    api_key = None
+    try:
+        import streamlit as st
+        api_key = st.secrets.get("GROQ_API_KEY", GROQ_API_KEY)
+    except Exception:
+        api_key = GROQ_API_KEY
+    if not api_key:
+        return "⚠️ Groq API key not configured."
+
+    prompt = (
+        "You are a friendly German teacher. "
+        "Correct the student's German and:\n"
+        "1. Put the corrected sentence in **bold**.\n"
+        "2. Explain each error in English.\n"
+        "3. End with a short encouraging sentence in German.\n"
+        f"\n\n{text}"
+    )
+    url = "https://api.groq.com/v1/requests"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {"model": "llama3-8b-8192", "input": prompt, "max_output_tokens": 800}
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        out = data.get("output", [])
+        if out:
+            return "".join(item.get("content","") for item in out)
+        return "(no response)"
+    except Exception as e:
+        return f"AI error: {e}"

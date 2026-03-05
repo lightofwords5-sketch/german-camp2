@@ -3,12 +3,19 @@
 #  Central configuration for the entire platform
 # ═══════════════════════════════════════════════
 
+import streamlit as st
+
 # ── App Identity ────────────────────────────────
 APP_NAME        = "German Mastery Camp"
 APP_TAGLINE     = "Learning is living — not just memorizing."
 APP_VERSION     = "2.0.0"
 APP_EMOJI       = "🇩🇪"
 CAMP_DURATION   = 90   # days
+
+# ── API KEYS ─────────────────────────────────────
+# temporary hard‑coded key for development; in production move to secrets
+GROQ_API_KEY    = "gsk_NE1SSBNN0JDcu3CHywFmWGdy3FY7quioGA7UCAe5FHKudZRZ0CQ"
+
 
 # ── Colors ──────────────────────────────────────
 COLORS = {
@@ -165,6 +172,79 @@ MANTRAS = [
     ('"Ohne Fleiß kein Preis."',
      "No pain, no gain."),
 ]
+
+# ── TRANSLATIONS / I18N ─────────────────────────────
+LANGUAGES = ["en", "ar"]
+TRANSLATIONS = {
+    "en": {
+        "sign_in": "Sign In",
+        "password": "Password",
+        "email": "Email",
+        "create_account": "Create Account",
+        "admin_login": "Admin Login",
+        "welcome": "Welcome, {name}!",
+        "home_subtitle": "*Learning is living — not just memorizing.*",
+        "daily_mission": "Daily Mission",
+        "complete_day": "Complete Day {day} — Earn 20 XP",
+        "locked":"Locked", "available":"Available","completed":"Completed",
+        "search_topic": "Search topic",
+        "play": "Play →",
+        "send": "Send →",
+        "clear_chat": "Clear Chat",
+        "grammar_fixer": "AI Grammar Fixer",
+        "chat_placeholder": "Ask Klaus anything about German…",
+        "logout": "Sign Out",
+        "progress": "Progress",
+        "xp": "XP",
+        "streak": "Streak",
+        "days": "days",
+        "home_title": "🇩🇪 Willkommen, {name}!",
+        "roadmap_title": "🗺️ Learning Roadmap",
+        "output_title": "🖼️ Output Comprehension",
+        "dictionary_title": "📖 Smart Dictionary",
+        "admin_panel": "⚙️ Admin Panel",
+    },
+    "ar": {
+        "sign_in": "تسجيل الدخول",
+        "password": "كلمة المرور",
+        "email": "البريد الإلكتروني",
+        "create_account": "إنشاء حساب",
+        "admin_login": "تسجيل دخول المسؤول",
+        "welcome": "أهلاً بك، {name}!",
+        "home_subtitle": "*التعلم هو الحياة — ليس مجرد حفظ.*",
+        "daily_mission": "مهمة اليوم",
+        "complete_day": "أكمل اليوم {day} — احصل على 20 نقاط XP",
+        "locked":"مقفلة", "available":"متاحة","completed":"مكتملة",
+        "search_topic": "ابحث عن موضوع",
+        "play": "العب →",
+        "send": "إرسال →",
+        "clear_chat": "مسح الدردشة",
+        "grammar_fixer": "مدقق القواعد بواسطة الذكاء الاصطناعي",
+        "chat_placeholder": "اسأل كلاوس أي شيء عن الألمانية...",
+        "logout": "تسجيل الخروج",
+        "progress": "التقدم",
+        "xp": "XP",
+        "streak": "سلسلة",
+        "days": "أيام",
+        "home_title": "🇩🇪 مرحباً، {name}!",
+        "roadmap_title": "🗺️ خريطة التعلم",
+        "output_title": "🖼️ فهم المخرجات",
+        "dictionary_title": "📖 القاموس الذكي",
+        "admin_panel": "⚙️ لوحة الإدارة",
+    },
+}
+
+def tr(key: str, **kwargs) -> str:
+    """Return translated string for current language."""
+    lang = kwargs.pop('lang', None)
+    if lang is None:
+        lang = st.session_state.get('lang', 'en')
+    text = TRANSLATIONS.get(lang, {}).get(key, key)
+    try:
+        return text.format(**kwargs)
+    except Exception:
+        return text
+
 
 # ── Grammar Topics by Phase ──────────────────────
 GRAMMAR_TOPICS = {
