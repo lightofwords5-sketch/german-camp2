@@ -9,6 +9,8 @@ import math
 import random
 import hashlib
 from typing import Optional
+from urllib.parse import quote_plus
+import streamlit as st
 
 # ────────────────────────────────────────────────────────────
 #  SPACED REPETITION SYSTEM  (SM-2 Algorithm)
@@ -380,6 +382,70 @@ def generate_streak_reminder(name: str, streak: int, day: int) -> str:
 
 «Ein Schritt nach dem anderen führt zum Ziel.»
 (خطوة خطوة توصل للهدف) 🇩🇪"""
+
+
+# ────────────────────────────────────────────────────────────
+#  PERSONAL VOCAB & TTS SYSTEM
+# ────────────────────────────────────────────────────────────
+
+def generate_tts_link(word: str) -> str:
+    """Return a Google TTS URL for any German word."""
+    return f"https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&q={quote_plus(word)}&tl=de"
+
+
+def add_personal_word(user_email: str, word: str, translation: str) -> bool:
+    """
+    Save a student's personal word to the User_Words sheet.
+    Columns expected: Email, Word, Translation, Timestamp
+    """
+    client = get_gsheet_client()
+    if not client:
+        return False
+    try:
+        sheet_id = st.secrets.get("sheet_id","")
+        wk = client.open_by_key(sheet_id).worksheet("User_Words")
+        wk.append_row([user_email, word, translation, datetime.datetime.now().isoformat()],
+                      value_input_option="USER_ENTERED")
+        load_sheet.clear()
+        return True
+    except Exception as e:
+        print("add_personal_word error", e)
+        return False
+
+
+def get_personal_words(user_email: str) -> list[dict]:
+    """Retrieve all personal vocabulary entries for a given user."""
+    df = load_sheet("User_Words")
+    if df.empty or "Email" not in df.columns:
+        return []
+    df = df[df["Email"].str.lower() == user_email.lower()]
+    return df.to_dict(orient="records")
+
+
+def fetch_dictionary_with_examples() -> list[dict]:
+    """
+    Return the built‑in German dictionary with examples.
+    Prioritize Google Sheet 'Dictionary' tab if available, else fallback to
+    a small hard‑coded sample.
+    Each entry: Word, Translation_Ar, Translation_En, Example, Audio_Link
+    """
+    df = load_sheet("Dictionary")
+    if not df.empty:
+        # ensure audio links exist
+        if "Audio_Link" not in df.columns:
+            df["Audio_Link"] = df["Word"].apply(generate_tts_link)
+        return df.to_dict(orient="records")
+
+    # fallback sample
+    sample = [
+        {"Word":"Haus","Translation_Ar":"بيت","Translation_En":"House",
+         "Example":"Das Haus ist groß","Audio_Link":generate_tts_link("Haus")},
+        {"Word":"Wasser","Translation_Ar":"ماء","Translation_En":"Water",
+         "Example":"Ich trinke Wasser","Audio_Link":generate_tts_link("Wasser")},
+        {"Word":"Lernen","Translation_Ar":"يتعلم","Translation_En":"To learn",
+         "Example":"Ich lerne Deutsch","Audio_Link":generate_tts_link("Lernen")},
+    ]
+    return sample
 
 
 # ────────────────────────────────────────────────────────────

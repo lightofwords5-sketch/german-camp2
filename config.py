@@ -2,6 +2,10 @@
 #  config.py  —  German Mastery Camp
 #  Central configuration for the entire platform
 # ═══════════════════════════════════════════════
+import streamlit as st
+
+# make sure AI key is available to modules that import config
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
 # ── App Identity ────────────────────────────────
 APP_NAME        = "German Mastery Camp"

@@ -14,6 +14,10 @@ import time
 import re
 from google.oauth2.service_account import Credentials
 
+# helper modules
+import utils
+from urllib.parse import quote_plus
+
 # ── optional AI ─────────────────────────────────────────────────────
 try:
     import anthropic
@@ -77,6 +81,7 @@ h3{color:var(--gold2)!important;}
 
 /* custom cards */
 .gmc-card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px 24px;margin-bottom:14px;}
+.gmc-card.glass{background:rgba(255,255,255,0.05)!important;backdrop-filter:blur(6px);border:none;}
 .gmc-card.gold{border-left:4px solid var(--gold);}
 .gmc-card.red{border-left:4px solid var(--red);}
 .gmc-card.green{border-left:4px solid var(--success);}
@@ -205,12 +210,16 @@ def get_user(email: str) -> dict | None:
     row = df[df["Email"].str.lower() == email.lower()]
     return row.iloc[0].to_dict() if not row.empty else None
 
-def register_user(name: str, email: str, password: str) -> bool:
+def register_user(name: str, email: str, password: str, role: str = "student") -> bool:
+    """Register a new user with an optional role ('student' or 'admin').
+    Role is stored as an extra column in the Users sheet.
+    """
     if get_user(email):
         return False
     hashed = hash_pw(password)
     now = datetime.datetime.now().isoformat()
-    return write_row("Users", [name, email, hashed, 0, 0, 1, 0, now, ""])
+    # the sheet may have columns [Name,Email,Password,Role,XP,Streak,...]
+    return write_row("Users", [name, email, hashed, role, 0, 0, 1, 0, now, ""])
 
 def login_user(email: str, password: str):
     user = get_user(email)
@@ -339,7 +348,26 @@ def get_phase(day: int) -> str:
     if day <= 60:  return "Construction"
     return "Activation"
 
+def get_cefr_level() -> str:
+    """Rough CEFR estimate based on number of days completed."""
+    days = len(st.session_state.completed_days)
+    if days <= 30:
+        return "Pre-A1 / A1"
+    if days <= 60:
+        return "A1 / A2"
+    return "A2 / B1"
+
 def get_vocab_for_user() -> list:
+    """Return a vocabulary list for games.
+    If the student has personal vocabulary entries, use those first; otherwise
+    fall back to the built‑in phase‑based sample list.
+    """
+    user_email = st.session_state.user.get("Email", "") if st.session_state.user else ""
+    if user_email:
+        personal_records = utils.get_personal_words(user_email)
+        if personal_records:
+            return [(r.get("Word"), r.get("Translation") or r.get("Translation_En", ""))
+                    for r in personal_records]
     phase = get_phase(len(st.session_state.completed_days) + 1).lower()
     return SAMPLE_VOCAB.get(phase, SAMPLE_VOCAB["foundation"])
 
@@ -374,11 +402,41 @@ def is_admin() -> bool:
 #  AI COPILOT
 # ════════════════════════════════════════════════════════════════════
 def ai_correct_german(text: str) -> str:
-    """Call Anthropic API to correct German text."""
+    """Correct German text using AI (OpenAI preferred, fallback to Anthropic).
+    The response includes the corrected sentence, an error breakdown,
+    and an encouraging remark.
+    """
+    # first try OpenAI if key present
+    try:
+        openai_key = st.secrets.get("OPENAI_API_KEY", "")
+        if openai_key:
+            import openai
+            openai.api_key = openai_key
+            prompt = (
+                "You are an expert German language tutor. "
+                "The student writes German text and you must:\n"
+                "1. Provide the corrected version in bold.\n"
+                "2. List each error with a clear explanation in English.\n"
+                "3. End with one encouraging sentence in German.\n"
+                "Keep responses concise and educational."
+            )
+            resp = openai.ChatCompletion.create(
+                model="gpt-4o-mini",  # adjust model as needed
+                max_tokens=800,
+                messages=[
+                    {"role":"system","content":prompt},
+                    {"role":"user","content":f"Please correct my German:\n\n{text}"},
+                ],
+            )
+            return resp.choices[0].message.content
+    except Exception:
+        pass
+
+    # fallback to anthropic if provided
     try:
         api_key = st.secrets.get("anthropic_api_key", "")
         if not api_key:
-            return "⚠️ AI API key not configured. Add `anthropic_api_key` to your secrets.toml."
+            return "⚠️ AI API key not configured. Add `OPENAI_API_KEY` or `anthropic_api_key` to your secrets."
         client = anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
             model="claude-sonnet-4-20250514",
@@ -398,14 +456,39 @@ def ai_correct_german(text: str) -> str:
         return f"AI error: {e}"
 
 def ai_chat(messages: list, user_msg: str) -> str:
-    """Streaming-style chat with Anthropic."""
+    """Streaming-style chat with an AI tutor (OpenAI preferred, Anthropic fallback)."""
+    # build conversation history
+    history = [{"role": m["role"], "content": m["content"]} for m in messages[-10:]]
+    history.append({"role":"user","content":user_msg})
+
+    # try OpenAI first
+    try:
+        openai_key = st.secrets.get("OPENAI_API_KEY", "")
+        if openai_key:
+            import openai
+            openai.api_key = openai_key
+            resp = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                max_tokens=600,
+                messages=[
+                    {"role": "system", "content": (
+                        "You are Klaus, a friendly German language tutor AI. "
+                        "You help students learning German with grammar, vocabulary, culture, and pronunciation. "
+                        "Keep answers concise. When giving German examples, always include the English translation."
+                    )},
+                    *history
+                ],
+            )
+            return resp.choices[0].message.content
+    except Exception:
+        pass
+
+    # fallback to Anthropic if available
     try:
         api_key = st.secrets.get("anthropic_api_key", "")
         if not api_key:
-            return "⚠️ API key not configured."
+            return "⚠️ AI API key not configured. Add `OPENAI_API_KEY` or `anthropic_api_key` to secrets."
         client = anthropic.Anthropic(api_key=api_key)
-        history = [{"role": m["role"], "content": m["content"]} for m in messages[-10:]]
-        history.append({"role":"user","content":user_msg})
         resp = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=600,
@@ -439,6 +522,7 @@ def render_xp_bar():
 
 # ── AUTH PAGE ────────────────────────────────────────────────────────
 def page_auth():
+    """Render authentication page with Google/OAuth and email methods."""
     col_l, col_c, col_r = st.columns([1,2,1])
     with col_c:
         st.markdown("""
@@ -447,52 +531,41 @@ def page_auth():
         <div class='auth-sub'>Your 90-day journey to German fluency starts here.</div>
         """, unsafe_allow_html=True)
 
-        tab_login, tab_register = st.tabs(["🔑 Sign In", "🆕 Create Account"])
+        # Google OAuth placeholder
+        if st.button("🔵 Sign in with Google", key="btn_google", use_container_width=True):
+            handle_google_oauth()
+
+        st.markdown("---")
+        tab_login, tab_register = st.tabs(["🔑 Email Login", "🆕 Register"])
 
         with tab_login:
-            email = st.text_input("Email", key="li_email", placeholder="your@email.com")
+            email = st.text_input("Email", key="li_email", placeholder="you@example.com")
             pw    = st.text_input("Password", type="password", key="li_pw", placeholder="••••••••")
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if st.button("Sign In →", key="btn_login", use_container_width=True):
-                    if not email or not pw:
-                        st.error("Please fill all fields.")
-                    else:
-                        # Demo mode: allow any login if sheets not configured
-                        gc = get_gsheet_client()
-                        if gc is None:
-                            st.session_state.logged_in = True
-                            st.session_state.user = {"Name": email.split("@")[0].title(), "Email": email, "XP": 0, "Streak": 0, "CompletedDays": ""}
-                            st.rerun()
-                        else:
-                            user = login_user(email, pw)
-                            if user:
-                                st.session_state.logged_in = True
-                                st.session_state.user = user
-                                sync_progress_from_db()
-                                st.rerun()
-                            else:
-                                st.error("Invalid credentials.")
-            with col_b:
-                admin_pw_try = st.text_input("Admin password", type="password", key="admin_pw_inp", placeholder="Admin only")
-                if st.button("Admin Login", key="btn_admin"):
-                    try:
-                        correct = st.secrets.get("admin_password", "admin1234")
-                    except Exception:
-                        correct = "admin1234"
-                    if admin_pw_try == correct:
+            if st.button("Sign In →", key="btn_login", use_container_width=True):
+                if not email or not pw:
+                    st.error("Please fill all fields.")
+                else:
+                    gc = get_gsheet_client()
+                    if gc is None:
                         st.session_state.logged_in = True
-                        st.session_state.is_admin  = True
-                        st.session_state.user = {"Name":"Admin","Email":"admin@camp.de","XP":9999,"Streak":90,"CompletedDays":""}
+                        st.session_state.user = {"Name": email.split("@")[0].title(), "Email": email, "XP": 0, "Streak": 0, "CompletedDays": ""}
                         st.rerun()
                     else:
-                        st.error("Wrong admin password.")
+                        user = login_user(email, pw)
+                        if user:
+                            st.session_state.logged_in = True
+                            st.session_state.user = user
+                            st.session_state.is_admin = str(user.get("Role","")).lower() == "admin"
+                            sync_progress_from_db()
+                            st.rerun()
+                        else:
+                            st.error("Invalid credentials.")
 
         with tab_register:
-            name  = st.text_input("Full Name", key="reg_name", placeholder="Ahmed Mohamed")
-            email2 = st.text_input("Email", key="reg_email", placeholder="your@email.com")
-            pw2   = st.text_input("Password (min 6 chars)", type="password", key="reg_pw")
-            pw2c  = st.text_input("Confirm Password", type="password", key="reg_pw2")
+            name   = st.text_input("Full Name", key="reg_name", placeholder="Ahmed Mohamed")
+            email2 = st.text_input("Email", key="reg_email", placeholder="you@example.com")
+            pw2    = st.text_input("Password (min 6 chars)", type="password", key="reg_pw")
+            pw2c   = st.text_input("Confirm Password", type="password", key="reg_pw2")
             if st.button("Create Account →", key="btn_reg", use_container_width=True):
                 if not all([name, email2, pw2, pw2c]):
                     st.error("Please fill all fields.")
@@ -503,13 +576,12 @@ def page_auth():
                 else:
                     gc = get_gsheet_client()
                     if gc is None:
-                        # Demo mode
                         st.session_state.logged_in = True
                         st.session_state.user = {"Name":name,"Email":email2,"XP":0,"Streak":0,"CompletedDays":""}
                         st.success("Welcome! (Demo mode — progress won't be saved)")
                         time.sleep(1); st.rerun()
                     else:
-                        if register_user(name, email2, pw2):
+                        if register_user(name, email2, pw2, role="student"):
                             st.success("Account created! Sign in now.")
                         else:
                             st.error("Email already registered.")
@@ -519,6 +591,14 @@ def page_auth():
             Open registration — anyone can join free 🎉
         </div>
         """, unsafe_allow_html=True)
+
+
+def handle_google_oauth():
+    """Placeholder for Google OAuth flow. Requires setting up credentials in secrets.
+    Real implementation should redirect the user to Google's OAuth consent screen and
+    handle the callback to obtain the user's email and profile.
+    """
+    st.info("Google OAuth is not configured. Add client_id/client_secret to secrets and implement the flow.")
 
 
 # ── HOME ─────────────────────────────────────────────────────────────
@@ -798,6 +878,51 @@ def page_ai_copilot():
                 st.warning("Please write some German text first.")
 
 
+def page_dictionary():
+    st.markdown("# 📖 Vocabulary Lab")
+    tab1, tab2 = st.tabs(["📚 Global Dictionary", "🗂️ My Words"])
+    # global dictionary
+    with tab1:
+        data = utils.fetch_dictionary_with_examples()
+        search = st.text_input("Search dictionary", key="dict_search", placeholder="Type a German word…")
+        for entry in data:
+            if search and search.lower() not in entry.get("Word","").lower():
+                continue
+            st.markdown(f"""<div class='gmc-card'>
+                    <div style='font-weight:700;'>{entry.get('Word','')} <span style='cursor:pointer;'>🔊</span></div>
+                    <div style='color:#ccc;'>{entry.get('Translation_Ar','')} / {entry.get('Translation_En','')}</div>
+                    <div style='font-size:.9rem;color:#777;'>{entry.get('Example','')}</div>
+                </div>""", unsafe_allow_html=True)
+            # audio player
+            st.audio(entry.get('Audio_Link',''))
+    # personal vocabulary
+    with tab2:
+        st.markdown("### 🌱 Your Personal Vocabulary")
+        user_email = st.session_state.user.get("Email", "") if st.session_state.user else ""
+        if user_email:
+            words = utils.get_personal_words(user_email)
+            if words:
+                for w in words:
+                    st.markdown(f"""<div class='gmc-card'>
+                        <div style='font-weight:700;'>{w.get('Word','')} 🔊</div>
+                        <div style='color:#ccc;'>{w.get('Translation','')}</div>
+                    </div>""", unsafe_allow_html=True)
+                    st.audio(utils.generate_tts_link(w.get('Word','')))
+            else:
+                st.info("You haven't added any personal words yet.")
+        st.markdown("---")
+        with st.form("add_word_form"):
+            new_word = st.text_input("German word", key="new_word")
+            new_trans = st.text_input("Translation", key="new_trans")
+            submitted = st.form_submit_button("Add to my words")
+            if submitted and new_word and new_trans:
+                success = utils.add_personal_word(user_email, new_word, new_trans)
+                if success:
+                    st.success("Word added!")
+                    st.experimental_rerun()
+                else:
+                    st.error("Failed to save word. Try again.")
+
 # ── MINI GAMES ───────────────────────────────────────────────────────
 def page_games():
     st.markdown("# 🎮 Mini Games")
@@ -995,6 +1120,9 @@ def page_leaderboard():
                 days = len(json.loads(str(row.get("CompletedDays","[]"))))
             except Exception:
                 days = 0
+            # ignore accounts with no progress
+            if days == 0:
+                continue
             lb_data.append({
                 "Name": row.get("Name","?"),
                 "XP":   int(row.get("XP", 0)) + days * 20,
@@ -1237,11 +1365,14 @@ def render_sidebar():
         if st.session_state.logged_in and st.session_state.user:
             name = st.session_state.user.get("Name","Learner")
             admin_tag = ' <span style="background:#f5c518;color:#000;border-radius:4px;padding:1px 6px;font-size:.65rem;font-weight:700;">ADMIN</span>' if is_admin() else ""
-            st.markdown(f"""
+            level = get_cefr_level()
+        streak = compute_streak(st.session_state.completed_days)
+        st.markdown(f"""
             <div style='text-align:center;margin-bottom:12px;'>
                 <div style='font-size:1.8rem;'>{"⚙️" if is_admin() else "👤"}</div>
                 <div style='font-weight:600;font-size:.95rem;'>{name}{admin_tag}</div>
                 <div style='color:#555;font-size:.75rem;'>⭐ {user_xp()} XP</div>
+                <div style='color:#aaa;font-size:.75rem;'>Level: {level} · 🔥 {streak}d streak</div>
             </div>""", unsafe_allow_html=True)
 
         st.markdown("---")
@@ -1251,6 +1382,7 @@ def render_sidebar():
             "🗺️ Roadmap":       "roadmap",
             "📅 Daily Mission": "daily",
             "🤖 AI Copilot":    "ai",
+            "📖 Dictionary":    "dictionary",
             "🎮 Games":         "games",
             "🏆 Leaderboard":   "leaderboard",
             "🔬 Phonetics Lab": "phonetics",
@@ -1275,6 +1407,9 @@ def render_sidebar():
         st.markdown(f"<div style='display:flex;justify-content:space-between;color:#888;font-size:.82rem;'><span>🔥 {streak} day streak</span><span>⭐ {user_xp()} XP</span></div>", unsafe_allow_html=True)
 
         st.markdown("---")
+        # support chat button
+        st.markdown("[🟢 Need help? Join our WhatsApp support group](https://wa.me/1234567890){target='_blank'}")
+        st.markdown("---")
         if st.button("🚪 Sign Out", key="signout"):
             save_progress()
             for k in list(st.session_state.keys()):
@@ -1294,6 +1429,7 @@ else:
     elif page == "roadmap":    page_roadmap()
     elif page == "daily":      page_daily()
     elif page == "ai":         page_ai_copilot()
+    elif page == "dictionary": page_dictionary()
     elif page == "games":      page_games()
     elif page == "leaderboard":page_leaderboard()
     elif page == "phonetics":  page_phonetics()
@@ -1303,7 +1439,6 @@ else:
         else:                  st.error("🔒 Admin access required.")
     else:
         page_home()
-
     # Footer
     st.markdown("---")
     st.markdown("""<div style='text-align:center;color:#333;font-size:.78rem;padding:8px 0 18px;'>
